@@ -9,12 +9,14 @@ return new class extends Migration
     public function up(): void
     {
         Schema::create('users', function (Blueprint $table) {
-            $table->char('id', 36)->primary(); // CORRIGÉ: char(36) au lieu de uuid()
-            $table->string('full_name', 255)->nullable();
-            $table->string('phone_or_email', 255)->nullable();
+            $table->char('id', 36)->primary();
+            $table->string('full_name', 255);
+            $table->string('phone_or_email', 255)->unique(); // ← NON NULLABLE et UNIQUE
             $table->text('avatar_url')->nullable();
             $table->string('password', 255);
             $table->string('confirm_password', 255);
+            $table->rememberToken(); // ← IMPORTANT pour Laravel
+            $table->timestamp('email_verified_at')->nullable(); // ← IMPORTANT pour vérification email
             $table->timestamps();
             $table->softDeletes();
             

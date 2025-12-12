@@ -18,19 +18,25 @@ class User extends Authenticatable
     protected $fillable = [
         'id',
         'full_name',
-        'phone_or_email',
+        'phone_or_email', // Maintenant obligatoire et unique
         'avatar_url',
         'password',
         'confirm_password',
+        'remember_token', // ← AJOUTÉ
+        'email_verified_at', // ← AJOUTÉ
     ];
 
     protected $hidden = [
         'password',
+        'confirm_password',
         'remember_token',
+        'two_factor_secret',
+        'two_factor_recovery_codes',
     ];
 
     protected $casts = [
         'email_verified_at' => 'datetime',
+        'two_factor_confirmed_at' => 'datetime',
         'created_at' => 'datetime',
         'updated_at' => 'datetime',
         'deleted_at' => 'datetime',
@@ -45,5 +51,29 @@ class User extends Authenticatable
                 $model->id = (string) \Illuminate\Support\Str::uuid();
             }
         });
+    }
+
+    /**
+     * Déterminer si le phone_or_email est un email
+     */
+    public function isEmail(): bool
+    {
+        return filter_var($this->phone_or_email, FILTER_VALIDATE_EMAIL) !== false;
+    }
+
+    /**
+     * Déterminer si le phone_or_email est un téléphone
+     */
+    public function isPhone(): bool
+    {
+        return !$this->isEmail();
+    }
+
+    /**
+     * Récupérer l'identifiant pour la connexion
+     */
+    public function getAuthIdentifierName(): string
+    {
+        return 'phone_or_email';
     }
 }
