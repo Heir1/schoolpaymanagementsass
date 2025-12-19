@@ -53,4 +53,21 @@ class UserRole extends Model
     {
         return $this->belongsTo(User::class, 'updated_by');
     }
+
+    // Dans UserRole.php
+    public function isSystemWide(): bool
+    {
+        return is_null($this->school_id);
+    }
+
+    public function scopeForSchool($query, $schoolId)
+    {
+        return $query->where('school_id', $schoolId);
+    }
+
+    public function scopeSystemWide($query)
+    {
+        return $query->whereNull('school_id');
+    }
+
 }
