@@ -93,18 +93,19 @@ class AdminUserController extends Controller
     /**
      * LISTER tous les utilisateurs (avec filtres)
      * GET /api/v1/admin/users
-    */
+     */
     public function index(Request $request)
     {
         try {
-
             $currentUser = $request->user();
             
             // Pagination
             $perPage = $request->input('per_page', 15);
             
-            // Construction de la requête avec eager loading
-            $query = User::with(['userRoles.role', 'userRoles.school', 'parentProfile']);
+            // Construction de la requête avec eager loading ET avec les soft deleted
+            // AJOUT: withTrashed() pour inclure les utilisateurs supprimés
+            $query = User::with(['userRoles.role', 'userRoles.school', 'parentProfile'])
+                        ->withTrashed();
             
             // Appliquer les filtres selon les permissions
             if (!$this->isSuperAdmin($currentUser)) {
@@ -132,7 +133,7 @@ class AdminUserController extends Controller
                 $search = $request->input('search');
                 $query->where(function ($q) use ($search) {
                     $q->where('full_name', 'like', "%{$search}%")
-                      ->orWhere('phone_or_email', 'like', "%{$search}%");
+                    ->orWhere('phone_or_email', 'like', "%{$search}%");
                 });
             }
             
@@ -148,12 +149,14 @@ class AdminUserController extends Controller
                 });
             }
             
+            // MODIFICATION: Simplification du filtre status
             if ($request->has('status')) {
                 if ($request->status === 'active') {
                     $query->whereNull('deleted_at');
                 } elseif ($request->status === 'deleted') {
                     $query->onlyTrashed();
                 }
+                // Si 'all' ou aucune valeur spécifique, on garde avecTrashed()
             }
             
             // Tri
@@ -173,6 +176,8 @@ class AdminUserController extends Controller
                     'email_verified_at' => $user->email_verified_at,
                     'created_at' => $user->created_at,
                     'updated_at' => $user->updated_at,
+                    'deleted_at' => $user->deleted_at, // AJOUT: Inclure la date de suppression
+                    'is_deleted' => !is_null($user->deleted_at), // AJOUT: Flag pour savoir si supprimé
                     'roles' => $user->userRoles->map(function ($userRole) {
                         return [
                             'id' => $userRole->id,
@@ -780,10 +785,10 @@ class AdminUserController extends Controller
     }
 
     /**
-     * TÉLÉCHARGER un avatar via URL (alternative)
-     * POST /api/v1/admin/users/{id}/avatar-from-url
+     * Télécharger un avatar via FormData (fichier)
+     * POST /api/v1/admin/users/{id}/avatar
     */
-    public function uploadAvatarFromUrl(Request $request, $id)
+    public function uploadAvatar(Request $request, $id)
     {
         DB::beginTransaction();
         
@@ -799,35 +804,43 @@ class AdminUserController extends Controller
                 ], 403);
             }
             
-            $request->validate([
-                'avatar_url' => 'required|url',
+            // Utiliser les mêmes règles de validation que dans store()
+            $validationRules = $this->getAvatarValidationRules();
+            $validationRules['avatar'] = [
+                'required',
+                'file',
+                'image',
+                'mimes:jpeg,png,jpg,gif,webp',
+                'max:2048', // 2MB comme dans store()
+            ];
+            
+            $validator = Validator::make($request->all(), $validationRules, [
+                'avatar.required' => 'Veuillez sélectionner un fichier.',
+                'avatar.image' => 'Le fichier doit être une image.',
+                'avatar.mimes' => 'L\'image doit être au format jpeg, png, jpg, gif ou webp.',
+                'avatar.max' => 'L\'image ne doit pas dépasser 2MB.',
             ]);
             
-            // Télécharger l'image depuis l'URL
-            $imageContent = file_get_contents($request->avatar_url);
-            if (!$imageContent) {
-                throw new \Exception('Impossible de télécharger l\'image depuis l\'URL fournie.');
+            if ($validator->fails()) {
+                return response()->json([
+                    'status' => 'error',
+                    'message' => 'Validation échouée',
+                    'errors' => $validator->errors(),
+                ], 422);
             }
             
-            // Déterminer l'extension
-            $headers = get_headers($request->avatar_url, 1);
-            $contentType = $headers['Content-Type'] ?? '';
+            // Récupérer le fichier
+            $avatarFile = $request->file('avatar');
             
-            $extension = 'jpg';
-            if (strpos($contentType, 'png') !== false) {
-                $extension = 'png';
-            } elseif (strpos($contentType, 'gif') !== false) {
-                $extension = 'gif';
-            } elseif (strpos($contentType, 'webp') !== false) {
-                $extension = 'webp';
+            if (!$avatarFile->isValid()) {
+                return response()->json([
+                    'status' => 'error',
+                    'message' => 'Le fichier uploadé n\'est pas valide.',
+                ], 422);
             }
             
-            // Générer un nom de fichier
-            $fileName = Str::uuid() . '.' . $extension;
-            $filePath = $this->avatarPath . '/' . $fileName;
-            
-            // Stocker le fichier
-            Storage::disk('public')->put($filePath, $imageContent);
+            // Utiliser la même méthode que dans store() pour gérer l'upload
+            $avatarPath = $this->handleAvatarUpload($avatarFile);
             
             // Supprimer l'ancien avatar
             if ($user->avatar_path) {
@@ -835,26 +848,27 @@ class AdminUserController extends Controller
             }
             
             // Mettre à jour l'utilisateur
-            $user->update(['avatar_path' => $filePath]);
+            $user->update(['avatar_path' => $avatarPath]);
             
             DB::commit();
 
             return response()->json([
                 'status' => 'success',
-                'message' => 'Avatar téléchargé depuis l\'URL avec succès',
+                'message' => 'Avatar téléchargé avec succès',
                 'data' => [
                     'user_id' => $user->id,
                     'full_name' => $user->full_name,
-                    'avatar_url' => $this->getAvatarUrl($filePath),
+                    'avatar_url' => $this->getAvatarUrl($avatarPath),
                 ],
             ]);
 
         } catch (\Exception $e) {
             DB::rollBack();
-            Log::error('Error uploading avatar from URL:', [
+            Log::error('Error uploading avatar:', [
                 'error' => $e->getMessage(),
+                'trace' => $e->getTraceAsString(),
                 'user_id' => $id,
-                'url' => $request->avatar_url ?? 'none'
+                'file_name' => $request->file('avatar') ? $request->file('avatar')->getClientOriginalName() : 'none'
             ]);
 
             return response()->json([
