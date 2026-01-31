@@ -73,7 +73,8 @@ class SchoolYearController extends Controller
             $perPage = $request->input('per_page', 15);
             
             // Construction de la requête avec eager loading
-            $query = SchoolYear::with(['school', 'createdBy', 'updatedBy']);
+            $query = SchoolYear::with(['school', 'createdBy', 'updatedBy'])
+                            ->withTrashed();
             
             // Appliquer les filtres selon les permissions
             if (!$this->isSuperAdmin($currentUser)) {
@@ -134,7 +135,7 @@ class SchoolYearController extends Controller
             
             $schoolYears = $query->paginate($perPage);
             
-            // Formater la réponse
+            // Formater la réponse selon le format attendu par le frontend
             $schoolYears->getCollection()->transform(function ($schoolYear) {
                 return [
                     'id' => $schoolYear->id,
@@ -157,6 +158,7 @@ class SchoolYearController extends Controller
                     'created_at' => $schoolYear->created_at,
                     'updated_at' => $schoolYear->updated_at,
                     'deleted_at' => $schoolYear->deleted_at,
+                    'is_deleted' => !is_null($schoolYear->deleted_at),
                 ];
             });
             

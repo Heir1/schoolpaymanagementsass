@@ -72,8 +72,9 @@ class StudentGroupController extends Controller
             // Pagination
             $perPage = $request->input('per_page', 15);
             
-            // Construction de la requête avec eager loading
-            $query = StudentGroup::with(['school', 'createdBy', 'updatedBy', 'groupFees']);
+            // Construction de la requête avec eager loading et withTrashed pour inclure les supprimés
+            $query = StudentGroup::with(['school', 'createdBy', 'updatedBy', 'groupFees'])
+                                ->withTrashed(); // AJOUT: Inclure les groupes supprimés
             
             // Appliquer les filtres selon les permissions
             if (!$this->isSuperAdmin($currentUser)) {
@@ -99,7 +100,7 @@ class StudentGroupController extends Controller
                 $search = $request->input('search');
                 $query->where(function ($q) use ($search) {
                     $q->where('name', 'like', "%{$search}%")
-                      ->orWhere('description', 'like', "%{$search}%");
+                    ->orWhere('description', 'like', "%{$search}%");
                 });
             }
             
@@ -107,12 +108,16 @@ class StudentGroupController extends Controller
                 $query->where('school_id', $request->school_id);
             }
             
+            // MODIFICATION: Amélioration du filtre status pour gérer withTrashed()
             if ($request->has('status')) {
                 if ($request->status === 'active') {
                     $query->whereNull('deleted_at');
                 } elseif ($request->status === 'deleted') {
-                    $query->onlyTrashed();
+                    $query->onlyTrashed(); // Uniquement les supprimés
+                } elseif ($request->status === 'all') {
+                    // Avec withTrashed() déjà appliqué, on garde tout
                 }
+                // Si aucune valeur spécifique, on garde withTrashed()
             }
             
             // Tri
@@ -122,7 +127,7 @@ class StudentGroupController extends Controller
             
             $studentGroups = $query->paginate($perPage);
             
-            // Formater la réponse
+            // Formater la réponse avec is_deleted
             $studentGroups->getCollection()->transform(function ($studentGroup) {
                 return [
                     'id' => $studentGroup->id,
@@ -144,6 +149,7 @@ class StudentGroupController extends Controller
                     'created_at' => $studentGroup->created_at,
                     'updated_at' => $studentGroup->updated_at,
                     'deleted_at' => $studentGroup->deleted_at,
+                    'is_deleted' => !is_null($studentGroup->deleted_at), // AJOUT: Champ is_deleted
                 ];
             });
             
@@ -620,36 +626,53 @@ class StudentGroupController extends Controller
     /**
      * STATISTIQUES des groupes d'étudiants
      * GET /api/v1/admin/student-groups/statistics
-     */
+    */
     public function statistics(Request $request)
     {
         try {
             $currentUser = $request->user();
             
-            $query = StudentGroup::query();
+            // Fonction pour créer une requête de base avec permissions
+            $createBaseQuery = function () use ($currentUser) {
+                $query = StudentGroup::withTrashed();
+                
+                if (!$this->isSuperAdmin($currentUser)) {
+                    $adminSchoolId = $currentUser->userRoles()
+                        ->whereHas('role', function ($q) {
+                            $q->where('name', 'school_admin');
+                        })
+                        ->value('school_id');
+                    
+                    if ($adminSchoolId) {
+                        $query->where('school_id', $adminSchoolId);
+                    }
+                }
+                
+                return $query;
+            };
             
-            // Appliquer les filtres selon les permissions
+            // Statistiques principales
+            $totalGroups = $createBaseQuery()->count();
+            $activeGroups = $createBaseQuery()->whereNull('deleted_at')->count();
+            $deletedGroups = $createBaseQuery()->onlyTrashed()->count();
+            
+            // Groupes par école (actifs seulement)
+            $groupsBySchoolQuery = StudentGroup::whereNull('deleted_at');
+            
             if (!$this->isSuperAdmin($currentUser)) {
-                // School admin ne voit que les groupes de son école
                 $adminSchoolId = $currentUser->userRoles()
-                    ->whereHas('role', function ($query) {
-                        $query->where('name', 'school_admin');
+                    ->whereHas('role', function ($q) {
+                        $q->where('name', 'school_admin');
                     })
                     ->value('school_id');
                 
                 if ($adminSchoolId) {
-                    $query->where('school_id', $adminSchoolId);
+                    $groupsBySchoolQuery->where('school_id', $adminSchoolId);
                 }
             }
             
-            $totalGroups = $query->count();
-            $activeGroups = $query->whereNull('deleted_at')->count();
-            $deletedGroups = $query->onlyTrashed()->count();
-            
-            // Groupes par école
-            $groupsBySchool = StudentGroup::select('school_id')
-                ->selectRaw('COUNT(*) as count')
-                ->whereNull('deleted_at')
+            $groupsBySchool = $groupsBySchoolQuery
+                ->select('school_id', DB::raw('COUNT(*) as count'))
                 ->groupBy('school_id')
                 ->with('school')
                 ->get()
@@ -660,8 +683,9 @@ class StudentGroupController extends Controller
                     ];
                 });
             
-            // Groupes créés récemment (30 derniers jours)
-            $recentGroups = StudentGroup::where('created_at', '>=', now()->subDays(30))
+            // Groupes récents
+            $recentGroups = $createBaseQuery()
+                ->where('created_at', '>=', now()->subDays(30))
                 ->count();
             
             return response()->json([
@@ -688,4 +712,5 @@ class StudentGroupController extends Controller
             ], 500);
         }
     }
+
 }

@@ -2,15 +2,15 @@
 
 namespace App\Modules\Schools\Models;
 
-use App\Modules\Users\Models\User;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\SoftDeletes;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
 use Illuminate\Database\Eloquent\Relations\HasMany;
+use App\Modules\Academic\Models\ClassModel; // IMPORTANT: Ajoutez cette ligne
+use App\Modules\Users\Models\User;
 
 class SchoolYear extends Model
 {
-    protected $table = 'school_years';
     use SoftDeletes;
 
     protected $fillable = [
@@ -45,5 +45,11 @@ class SchoolYear extends Model
     public function updatedBy(): BelongsTo
     {
         return $this->belongsTo(User::class, 'updated_by');
+    }
+
+    // AJOUTEZ CETTE MÉTHODE POUR LA RELATION AVEC LES CLASSES
+    public function classes(): HasMany
+    {
+        return $this->hasMany(ClassModel::class, 'school_year_id');
     }
 }

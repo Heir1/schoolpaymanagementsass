@@ -18,6 +18,7 @@ class School extends Model
         'type_id',
         'address',
         'phone',
+        'logo_path',
         'created_by',
         'updated_by',
     ];

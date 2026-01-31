@@ -59,6 +59,8 @@ Route::prefix('v1')->group(function () {
         // CRUD complet des utilisateurs
         Route::prefix('users')->group(function () {
 
+            Route::get('/statistics', [AdminUserController::class, 'statistics']);
+
             Route::put('/change-password', [AdminUserController::class, 'changePassword']);
             // Vérifier le statut du mot de passe
             Route::get('/check-password-status', [AdminUserController::class, 'checkPasswordStatus']);
@@ -92,6 +94,12 @@ Route::prefix('v1')->group(function () {
             
             // Actions supplémentaires
             Route::post('/{id}/restore', [SchoolController::class, 'restore']);
+
+
+            // Routes pour les logos d'écoles
+            Route::post('/{id}/logo', [SchoolController::class, 'uploadLogo']);
+            Route::delete('/{id}/logo', [SchoolController::class, 'deleteLogo']);
+
             
         });
     
@@ -142,6 +150,7 @@ Route::prefix('v1')->group(function () {
             
             // Statistiques
             Route::get('/statistics', [ClassController::class, 'statistics']);
+            Route::get('/options', [ClassController::class, 'getOptions']);
 
             // CRUD de base
             Route::get('/', [ClassController::class, 'index']);

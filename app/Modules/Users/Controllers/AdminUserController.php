@@ -1255,4 +1255,226 @@ class AdminUserController extends Controller
         }
     }
 
+    /**
+     * STATISTIQUES des utilisateurs
+     * GET /api/v1/admin/users/statistics
+     */
+    public function statistics(Request $request)
+    {
+        try {
+            $currentUser = $request->user();
+            
+            // Initialiser les statistiques
+            $stats = [
+                'total_users' => 0,
+                'active_users' => 0,
+                'deleted_users' => 0,
+                'users_by_role' => [],
+                'users_by_school' => [],
+                'new_users_today' => 0,
+                'new_users_this_week' => 0,
+                'new_users_this_month' => 0,
+                'users_without_avatar' => 0,
+                'email_verified_users' => 0,
+                'phone_users' => 0,
+                'email_users' => 0,
+            ];
+
+            // Construire la requête de base
+            $query = User::with(['userRoles.role', 'userRoles.school'])
+                        ->withTrashed();
+            
+            // Appliquer les filtres selon les permissions
+            if (!$this->isSuperAdmin($currentUser)) {
+                // School admin ne voit que les statistiques de son école
+                $adminSchoolId = $currentUser->userRoles()
+                    ->whereHas('role', function ($query) {
+                        $query->where('name', 'school_admin');
+                    })
+                    ->value('school_id');
+                
+                if ($adminSchoolId) {
+                    $query->whereHas('userRoles', function (Builder $query) use ($adminSchoolId) {
+                        $query->where('school_id', $adminSchoolId);
+                    });
+                    
+                    // Limiter les écoles à celle de l'admin
+                    $schoolFilterId = $adminSchoolId;
+                } else {
+                    return response()->json([
+                        'status' => 'error',
+                        'message' => 'Vous n\'avez pas les permissions nécessaires.',
+                    ], 403);
+                }
+            } else {
+                $schoolFilterId = null;
+            }
+
+            // Statistiques globales
+            $stats['total_users'] = User::count();
+            $stats['active_users'] = User::whereNull('deleted_at')->count();
+            $stats['deleted_users'] = User::onlyTrashed()->count();
+            
+            // Statistiques par rôle
+            $roles = Role::all();
+            foreach ($roles as $role) {
+                $roleQuery = User::whereHas('userRoles', function (Builder $query) use ($role, $schoolFilterId) {
+                    $query->where('role_id', $role->id);
+                    if ($schoolFilterId) {
+                        $query->where('school_id', $schoolFilterId);
+                    }
+                });
+                
+                $stats['users_by_role'][$role->name] = [
+                    'id' => $role->id,
+                    'name' => $role->name,
+                    'description' => $role->description,
+                    'total' => $roleQuery->count(),
+                    'active' => $roleQuery->whereNull('deleted_at')->count(),
+                    'deleted' => $roleQuery->onlyTrashed()->count(),
+                ];
+            }
+
+            // Statistiques par école (seulement pour super admin)
+            if ($this->isSuperAdmin($currentUser)) {
+                $schools = School::all();
+                foreach ($schools as $school) {
+                    $schoolQuery = User::whereHas('userRoles', function (Builder $query) use ($school) {
+                        $query->where('school_id', $school->id);
+                    });
+                    
+                    $stats['users_by_school'][$school->name] = [
+                        'id' => $school->id,
+                        'name' => $school->name,
+                        'total' => $schoolQuery->count(),
+                        'active' => $schoolQuery->whereNull('deleted_at')->count(),
+                        'deleted' => $schoolQuery->onlyTrashed()->count(),
+                    ];
+                }
+            } elseif ($schoolFilterId) {
+                // Pour school admin, statistiques de son école seulement
+                $school = School::find($schoolFilterId);
+                if ($school) {
+                    $schoolQuery = User::whereHas('userRoles', function (Builder $query) use ($schoolFilterId) {
+                        $query->where('school_id', $schoolFilterId);
+                    });
+                    
+                    $stats['users_by_school'][$school->name] = [
+                        'id' => $school->id,
+                        'name' => $school->name,
+                        'total' => $schoolQuery->count(),
+                        'active' => $schoolQuery->whereNull('deleted_at')->count(),
+                        'deleted' => $schoolQuery->onlyTrashed()->count(),
+                    ];
+                }
+            }
+
+            // Nouveaux utilisateurs
+            $today = now()->startOfDay();
+            $startOfWeek = now()->startOfWeek();
+            $startOfMonth = now()->startOfMonth();
+            
+            $stats['new_users_today'] = User::where('created_at', '>=', $today)->count();
+            $stats['new_users_this_week'] = User::where('created_at', '>=', $startOfWeek)->count();
+            $stats['new_users_this_month'] = User::where('created_at', '>=', $startOfMonth)->count();
+            
+            // Autres statistiques
+            $stats['users_without_avatar'] = User::whereNull('avatar_path')->count();
+            $stats['email_verified_users'] = User::whereNotNull('email_verified_at')->count();
+            
+            // Utilisateurs avec email vs téléphone
+            $stats['email_users'] = User::where('phone_or_email', 'LIKE', '%@%')->count();
+            $stats['phone_users'] = $stats['total_users'] - $stats['email_users'];
+            
+            // Distribution par date de création (derniers 30 jours)
+            $creationDistribution = [];
+            for ($i = 30; $i >= 0; $i--) {
+                $date = now()->subDays($i)->format('Y-m-d');
+                $count = User::whereDate('created_at', $date)->count();
+                $creationDistribution[$date] = $count;
+            }
+            $stats['creation_distribution_last_30_days'] = $creationDistribution;
+            
+            // Top 5 écoles avec le plus d'utilisateurs (seulement pour super admin)
+            if ($this->isSuperAdmin($currentUser)) {
+                // Compter les utilisateurs par école via la table user_roles
+                $topSchools = DB::table('schools')
+                    ->leftJoin('user_roles', 'schools.id', '=', 'user_roles.school_id')
+                    ->leftJoin('users', 'user_roles.user_id', '=', 'users.id')
+                    ->select(
+                        'schools.id',
+                        'schools.name',
+                        DB::raw('COUNT(DISTINCT users.id) as user_count')
+                    )
+                    ->whereNull('users.deleted_at')
+                    ->groupBy('schools.id', 'schools.name')
+                    ->orderBy('user_count', 'desc')
+                    ->take(5)
+                    ->get()
+                    ->map(function ($school) {
+                        return [
+                            'id' => $school->id,
+                            'name' => $school->name,
+                            'user_count' => (int) $school->user_count,
+                        ];
+                    });
+                
+                $stats['top_schools_by_user_count'] = $topSchools;
+            }
+            
+            // Pourcentage d'utilisateurs actifs
+            $stats['active_percentage'] = $stats['total_users'] > 0 
+                ? round(($stats['active_users'] / $stats['total_users']) * 100, 2)
+                : 0;
+            
+            // Pourcentage d'utilisateurs vérifiés
+            $stats['verified_percentage'] = $stats['total_users'] > 0 
+                ? round(($stats['email_verified_users'] / $stats['total_users']) * 100, 2)
+                : 0;
+            
+            // Pourcentage d'utilisateurs avec avatar
+            $stats['with_avatar_percentage'] = $stats['total_users'] > 0 
+                ? round((($stats['total_users'] - $stats['users_without_avatar']) / $stats['total_users']) * 100, 2)
+                : 0;
+            
+            // Résumé des permissions
+            $stats['permissions'] = [
+                'is_super_admin' => $this->isSuperAdmin($currentUser),
+                'can_see_all_schools' => $this->isSuperAdmin($currentUser),
+                'school_id' => $schoolFilterId ?? null,
+            ];
+
+            // Ajouter des métriques additionnelles
+            $stats['metrics'] = [
+                'avg_users_per_role' => count($stats['users_by_role']) > 0 
+                    ? round(array_sum(array_column($stats['users_by_role'], 'total')) / count($stats['users_by_role']), 2)
+                    : 0,
+                'avg_users_per_school' => count($stats['users_by_school']) > 0 
+                    ? round(array_sum(array_column($stats['users_by_school'], 'total')) / count($stats['users_by_school']), 2)
+                    : 0,
+                'growth_rate_this_week' => $stats['new_users_this_week'] > 0 
+                    ? round(($stats['new_users_this_week'] / max(1, $stats['total_users'] - $stats['new_users_this_week'])) * 100, 2)
+                    : 0,
+            ];
+
+            return response()->json([
+                'status' => 'success',
+                'data' => $stats,
+                'message' => 'Statistiques des utilisateurs récupérées avec succès',
+            ]);
+            
+        } catch (\Exception $e) {
+            Log::error('Admin user statistics error:', [
+                'error' => $e->getMessage(),
+                'trace' => $e->getTraceAsString()
+            ]);
+            
+            return response()->json([
+                'status' => 'error',
+                'message' => 'Erreur lors de la récupération des statistiques',
+                'error' => env('APP_DEBUG') ? $e->getMessage() : null,
+            ], 500);
+        }
+    }
+
 }

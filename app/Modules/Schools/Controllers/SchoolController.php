@@ -9,11 +9,18 @@ use App\Modules\Users\Models\User;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Log;
+use Illuminate\Support\Facades\Storage;
 use Illuminate\Support\Facades\Validator;
+use Illuminate\Support\Str;
 use Illuminate\Validation\Rule;
 
 class SchoolController extends Controller
 {
+    /**
+     * Chemin de stockage des logos
+     */
+    private $logoPath = 'schools/logos';
+
     /**
      * Vérifier si l'utilisateur est super admin
      */
@@ -56,7 +63,67 @@ class SchoolController extends Controller
     }
 
     /**
-     * LISTER toutes les écoles (avec filtres)
+     * Récupérer les règles de validation pour le logo
+     */
+    private function getLogoValidationRules()
+    {
+        return [
+            'logo' => 'nullable|image|mimes:jpeg,png,jpg,gif,webp,svg|max:2048', // 2MB, svg pour les logos vectoriels
+        ];
+    }
+
+    /**
+     * Gérer l'upload d'un fichier logo
+     */
+    private function handleLogoUpload($file)
+    {
+        if (!$file->isValid()) {
+            throw new \Exception('Le fichier uploadé n\'est pas valide.');
+        }
+        
+        $extension = $file->getClientOriginalExtension();
+        $fileName = Str::uuid() . '.' . $extension;
+        $filePath = $this->logoPath . '/' . $fileName;
+        
+        // CORRECTION: Utiliser storeAs pour garantir le bon chemin
+        $storedPath = $file->storeAs($this->logoPath, $fileName, 'public');
+        
+        // Log pour débogage
+        Log::info('Logo uploaded', [
+            'original_path' => $filePath,
+            'stored_path' => $storedPath,
+            'file_name' => $fileName,
+            'disk' => 'public'
+        ]);
+        
+        return $storedPath;
+    }
+
+    /**
+     * Supprimer un fichier logo
+     */
+    private function deleteLogoFile($logoPath)
+    {
+        if ($logoPath && Storage::disk('public')->exists($logoPath)) {
+            Storage::disk('public')->delete($logoPath);
+            return true;
+        }
+        return false;
+    }
+
+    // /**
+    //  * Obtenir l'URL complète du logo
+    //  */
+    // private function getLogoUrl($logoPath)
+    // {
+    //     if (!$logoPath) {
+    //         return null;
+    //     }
+    //     return Storage::disk('public')->url($logoPath);
+    // }
+
+    /**
+     * LISTER toutes les écoles (avec filtres et écoles supprimées)
      * GET /api/v1/admin/schools
      */
     public function index(Request $request)
@@ -67,8 +134,9 @@ class SchoolController extends Controller
             // Pagination
             $perPage = $request->input('per_page', 15);
             
-            // Construction de la requête avec eager loading
-            $query = School::with(['type', 'createdBy', 'updatedBy', 'schoolYears']);
+            // Construction de la requête avec eager loading ET avec les soft deleted
+            $query = School::with(['type', 'createdBy', 'updatedBy', 'schoolYears'])
+                        ->withTrashed();
             
             // Appliquer les filtres selon les permissions
             if (!$this->isSuperAdmin($currentUser)) {
@@ -103,12 +171,14 @@ class SchoolController extends Controller
                 $query->where('type_id', $request->type_id);
             }
             
-            if ($request->has('status')) {
+            // Filtre par statut (pour les superadmins)
+            if ($request->has('status') && $this->isSuperAdmin($currentUser)) {
                 if ($request->status === 'active') {
                     $query->whereNull('deleted_at');
                 } elseif ($request->status === 'deleted') {
                     $query->onlyTrashed();
                 }
+                // 'all' est le comportement par défaut (withTrashed)
             }
             
             // Tri
@@ -118,7 +188,7 @@ class SchoolController extends Controller
             
             $schools = $query->paginate($perPage);
             
-            // Formater la réponse
+            // Formater la réponse avec indicateur de suppression
             $schools->getCollection()->transform(function ($school) {
                 return [
                     'id' => $school->id,
@@ -129,6 +199,7 @@ class SchoolController extends Controller
                     ] : null,
                     'address' => $school->address,
                     'phone' => $school->phone,
+                    'logo_url' => $school->logo_path ? $this->getLogoUrl($school->logo_path) : null,
                     'school_years_count' => $school->schoolYears->count(),
                     'created_by' => $school->createdBy ? [
                         'id' => $school->createdBy->id,
@@ -141,6 +212,7 @@ class SchoolController extends Controller
                     'created_at' => $school->created_at,
                     'updated_at' => $school->updated_at,
                     'deleted_at' => $school->deleted_at,
+                    'is_deleted' => !is_null($school->deleted_at), // Indicateur de suppression
                 ];
             });
             
@@ -165,7 +237,7 @@ class SchoolController extends Controller
     }
 
     /**
-     * VOIR une école spécifique
+     * VOIR une école spécifique (inclut les supprimées)
      * GET /api/v1/admin/schools/{id}
      */
     public function show(Request $request, $id)
@@ -173,7 +245,9 @@ class SchoolController extends Controller
         try {
             $currentUser = $request->user();
             
+            // Rechercher l'école même si elle est supprimée (avec withTrashed)
             $school = School::with(['type', 'createdBy', 'updatedBy', 'schoolYears'])
+                ->withTrashed()
                 ->findOrFail($id);
             
             // Vérifier les permissions
@@ -194,6 +268,7 @@ class SchoolController extends Controller
                 ] : null,
                 'address' => $school->address,
                 'phone' => $school->phone,
+                'logo_url' => $school->logo_path ? $this->getLogoUrl($school->logo_path) : null,
                 'created_by' => $school->createdBy ? [
                     'id' => $school->createdBy->id,
                     'name' => $school->createdBy->full_name,
@@ -214,6 +289,7 @@ class SchoolController extends Controller
                 'created_at' => $school->created_at,
                 'updated_at' => $school->updated_at,
                 'deleted_at' => $school->deleted_at,
+                'is_deleted' => !is_null($school->deleted_at), // Indicateur de suppression
             ];
             
             return response()->json([
@@ -238,7 +314,6 @@ class SchoolController extends Controller
 
     /**
      * CRÉER une nouvelle école
-     * POST /api/v1/admin/schools
      */
     public function store(Request $request)
     {
@@ -247,7 +322,6 @@ class SchoolController extends Controller
         try {
             $currentUser = $request->user();
             
-            // Vérifier les permissions (seul superadmin peut créer des écoles)
             if (!$this->isSuperAdmin($currentUser)) {
                 return response()->json([
                     'status' => 'error',
@@ -255,8 +329,8 @@ class SchoolController extends Controller
                 ], 403);
             }
             
-            // Validation
-            $validator = Validator::make($request->all(), [
+            // Règles de validation combinées
+            $validationRules = array_merge([
                 'name' => 'required|string|max:255|unique:schools,name',
                 'type_id' => 'required|integer|exists:school_types,id',
                 'address' => 'nullable|string|max:500',
@@ -266,12 +340,16 @@ class SchoolController extends Controller
                     'max:20',
                     'regex:/^\+?[1-9]\d{1,14}$/',
                 ],
-            ], [
+            ], $this->getLogoValidationRules());
+
+            $validator = Validator::make($request->all(), $validationRules, [
                 'name.required' => 'Le nom de l\'école est requis.',
                 'name.unique' => 'Ce nom d\'école est déjà utilisé.',
                 'type_id.required' => 'Le type d\'école est requis.',
                 'type_id.exists' => 'Le type d\'école sélectionné n\'existe pas.',
                 'phone.regex' => 'Le numéro de téléphone n\'est pas valide.',
+                'logo.image' => 'Le fichier doit être une image.',
+                'logo.max' => 'L\'image ne doit pas dépasser 2MB.',
             ]);
             
             if ($validator->fails()) {
@@ -282,27 +360,39 @@ class SchoolController extends Controller
                 ], 422);
             }
             
-            // Créer l'école
-            $school = School::create([
+            // Gérer le logo AVANT de créer l'école
+            $logoPath = null;
+            if ($request->hasFile('logo') && $request->file('logo')->isValid()) {
+                $logoPath = $this->handleLogoUpload($request->file('logo'));
+                Log::info('Logo path to save in DB:', ['logo_path' => $logoPath]);
+            }
+            
+            // Créer l'école avec le logo_path
+            $schoolData = [
                 'name' => $request->name,
                 'type_id' => $request->type_id,
                 'address' => $request->address,
                 'phone' => $request->phone,
                 'created_by' => $currentUser->id,
                 'updated_by' => $currentUser->id,
-            ]);
+            ];
+
+            // CORRECTION: Toujours inclure logo_path, même si null
+            $schoolData['logo_path'] = $logoPath;
+
+            $school = School::create($schoolData);
             
             // Charger les relations
             $school->load(['type', 'createdBy', 'updatedBy']);
             
             DB::commit();
             
-            // Log pour audit
             Log::info('School created', [
                 'admin_id' => $currentUser->id,
-                'admin_name' => $currentUser->full_name,
                 'school_id' => $school->id,
                 'school_name' => $school->name,
+                'logo_path' => $school->logo_path, // Log du champ en base
+                'has_logo' => !is_null($school->logo_path),
             ]);
             
             return response()->json([
@@ -315,6 +405,7 @@ class SchoolController extends Controller
                         'type' => $school->type->name,
                         'address' => $school->address,
                         'phone' => $school->phone,
+                        'logo_url' => $school->logo_path ? Storage::url($school->logo_path) : null,
                         'created_by' => $school->createdBy->full_name,
                         'created_at' => $school->created_at,
                     ],
@@ -326,7 +417,7 @@ class SchoolController extends Controller
             Log::error('Error creating school:', [
                 'error' => $e->getMessage(),
                 'trace' => $e->getTraceAsString(),
-                'request' => $request->all()
+                'request_data' => $request->except(['logo']) // Exclure le fichier binaire
             ]);
             
             return response()->json([
@@ -339,7 +430,6 @@ class SchoolController extends Controller
 
     /**
      * METTRE À JOUR une école
-     * PUT /api/v1/admin/schools/{id}
      */
     public function update(Request $request, $id)
     {
@@ -349,7 +439,6 @@ class SchoolController extends Controller
             $currentUser = $request->user();
             $school = School::findOrFail($id);
             
-            // Vérifier les permissions
             if (!$this->checkSchoolPermissions($currentUser, $school)) {
                 return response()->json([
                     'status' => 'error',
@@ -357,8 +446,11 @@ class SchoolController extends Controller
                 ], 403);
             }
             
-            // Validation
-            $validator = Validator::make($request->all(), [
+            // CORRECTION: Récupérer l'ancien logo_path avant tout changement
+            $oldLogoPath = $school->logo_path;
+            
+            // Règles de validation combinées
+            $validationRules = array_merge([
                 'name' => [
                     'sometimes',
                     'required',
@@ -374,10 +466,14 @@ class SchoolController extends Controller
                     'max:20',
                     'regex:/^\+?[1-9]\d{1,14}$/',
                 ],
-            ], [
+            ], $this->getLogoValidationRules());
+
+            $validator = Validator::make($request->all(), $validationRules, [
                 'name.unique' => 'Ce nom d\'école est déjà utilisé.',
                 'type_id.exists' => 'Le type d\'école sélectionné n\'existe pas.',
                 'phone.regex' => 'Le numéro de téléphone n\'est pas valide.',
+                'logo.image' => 'Le fichier doit être une image.',
+                'logo.max' => 'L\'image ne doit pas dépasser 2MB.',
             ]);
             
             if ($validator->fails()) {
@@ -388,8 +484,16 @@ class SchoolController extends Controller
                 ], 422);
             }
             
+            // Gérer le logo
+            $newLogoPath = null;
+            if ($request->hasFile('logo') && $request->file('logo')->isValid()) {
+                $newLogoPath = $this->handleLogoUpload($request->file('logo'));
+            }
+            
             // Mettre à jour l'école
-            $updateData = [];
+            $updateData = [
+                'updated_by' => $currentUser->id,
+            ];
             
             if ($request->has('name')) {
                 $updateData['name'] = $request->name;
@@ -407,10 +511,21 @@ class SchoolController extends Controller
                 $updateData['phone'] = $request->phone;
             }
             
-            // Toujours mettre à jour le champ updated_by
-            $updateData['updated_by'] = $currentUser->id;
+            // CORRECTION: Toujours mettre à jour logo_path si nouveau logo
+            if ($newLogoPath) {
+                $updateData['logo_path'] = $newLogoPath;
+            }
             
             $school->update($updateData);
+            
+            // CORRECTION: Supprimer l'ancien logo APRÈS la mise à jour réussie
+            if ($newLogoPath && $oldLogoPath) {
+                $this->deleteLogoFile($oldLogoPath);
+                Log::info('Old logo deleted after successful update', [
+                    'old_logo_path' => $oldLogoPath,
+                    'school_id' => $school->id
+                ]);
+            }
             
             // Recharger les relations
             $school->load(['type', 'createdBy', 'updatedBy']);
@@ -420,7 +535,9 @@ class SchoolController extends Controller
             Log::info('School updated', [
                 'admin_id' => $currentUser->id,
                 'school_id' => $school->id,
-                'changes' => $updateData,
+                'logo_updated' => !is_null($newLogoPath),
+                'old_logo_deleted' => ($newLogoPath && $oldLogoPath),
+                'new_logo_path' => $school->logo_path,
             ]);
             
             return response()->json([
@@ -433,6 +550,7 @@ class SchoolController extends Controller
                         'type' => $school->type->name,
                         'address' => $school->address,
                         'phone' => $school->phone,
+                        'logo_url' => $school->logo_path ? Storage::url($school->logo_path) : null,
                         'updated_by' => $school->updatedBy->full_name,
                         'updated_at' => $school->updated_at,
                     ],
@@ -445,8 +563,16 @@ class SchoolController extends Controller
                 'error' => $e->getMessage(),
                 'trace' => $e->getTraceAsString(),
                 'school_id' => $id,
-                'request' => $request->all()
+                'request' => $request->except(['logo'])
             ]);
+            
+            // CORRECTION: Supprimer le nouveau logo si la transaction a échoué
+            if (isset($newLogoPath)) {
+                $this->deleteLogoFile($newLogoPath);
+                Log::info('New logo deleted after failed update', [
+                    'new_logo_path' => $newLogoPath
+                ]);
+            }
             
             return response()->json([
                 'status' => 'error',
@@ -457,8 +583,186 @@ class SchoolController extends Controller
     }
 
     /**
-     * SUPPRIMER une école (soft delete)
-     * DELETE /api/v1/admin/schools/{id}
+     * UPLOADER un logo pour une école
+     */
+    public function uploadLogo(Request $request, $id)
+    {
+        DB::beginTransaction();
+        
+        try {
+            $currentUser = $request->user();
+            $school = School::findOrFail($id);
+            
+            if (!$this->checkSchoolPermissions($currentUser, $school)) {
+                return response()->json([
+                    'status' => 'error',
+                    'message' => 'Vous n\'avez pas les permissions pour modifier cette école.',
+                ], 403);
+            }
+            
+            // CORRECTION: Récupérer l'ancien logo avant tout
+            $oldLogoPath = $school->logo_path;
+            
+            // Validation
+            $validationRules = $this->getLogoValidationRules();
+            $validationRules['logo'] = [
+                'required',
+                'file',
+                'image',
+                'mimes:jpeg,png,jpg,gif,webp,svg',
+                'max:2048',
+            ];
+            
+            $validator = Validator::make($request->all(), $validationRules, [
+                'logo.required' => 'Veuillez sélectionner un fichier.',
+                'logo.image' => 'Le fichier doit être une image.',
+                'logo.mimes' => 'L\'image doit être au format jpeg, png, jpg, gif, webp ou svg.',
+                'logo.max' => 'L\'image ne doit pas dépasser 2MB.',
+            ]);
+            
+            if ($validator->fails()) {
+                return response()->json([
+                    'status' => 'error',
+                    'message' => 'Validation échouée',
+                    'errors' => $validator->errors(),
+                ], 422);
+            }
+            
+            // Récupérer et valider le fichier
+            $logoFile = $request->file('logo');
+            
+            if (!$logoFile->isValid()) {
+                return response()->json([
+                    'status' => 'error',
+                    'message' => 'Le fichier uploadé n\'est pas valide.',
+                ], 422);
+            }
+            
+            // Uploader le nouveau logo
+            $newLogoPath = $this->handleLogoUpload($logoFile);
+            
+            // Mettre à jour l'école
+            $school->update([
+                'logo_path' => $newLogoPath,
+                'updated_by' => $currentUser->id,
+            ]);
+            
+            // CORRECTION: Supprimer l'ancien logo APRÈS la mise à jour réussie
+            if ($oldLogoPath) {
+                $this->deleteLogoFile($oldLogoPath);
+                Log::info('Old logo deleted after uploadLogo', [
+                    'old_logo_path' => $oldLogoPath,
+                    'school_id' => $school->id
+                ]);
+            }
+            
+            DB::commit();
+
+            return response()->json([
+                'status' => 'success',
+                'message' => 'Logo téléchargé avec succès',
+                'data' => [
+                    'school_id' => $school->id,
+                    'name' => $school->name,
+                    'logo_url' => Storage::url($newLogoPath),
+                ],
+            ]);
+
+        } catch (\Exception $e) {
+            DB::rollBack();
+            
+            // CORRECTION: Supprimer le nouveau logo si la transaction a échoué
+            if (isset($newLogoPath)) {
+                $this->deleteLogoFile($newLogoPath);
+            }
+            
+            Log::error('Error uploading school logo:', [
+                'error' => $e->getMessage(),
+                'trace' => $e->getTraceAsString(),
+                'school_id' => $id,
+            ]);
+
+            return response()->json([
+                'status' => 'error',
+                'message' => 'Erreur lors du téléchargement du logo: ' . $e->getMessage(),
+            ], 500);
+        }
+    }
+
+
+    /**
+     * SUPPRIMER le logo d'une école
+     */
+    public function deleteLogo(Request $request, $id)
+    {
+        DB::beginTransaction();
+        
+        try {
+            $currentUser = $request->user();
+            $school = School::findOrFail($id);
+            
+            if (!$this->checkSchoolPermissions($currentUser, $school)) {
+                return response()->json([
+                    'status' => 'error',
+                    'message' => 'Vous n\'avez pas les permissions pour modifier cette école.',
+                ], 403);
+            }
+            
+            if (!$school->logo_path) {
+                return response()->json([
+                    'status' => 'error',
+                    'message' => 'Cette école n\'a pas de logo.',
+                ], 404);
+            }
+            
+            // CORRECTION: Récupérer le chemin avant de le supprimer de la base
+            $logoPathToDelete = $school->logo_path;
+            
+            // Mettre à jour l'école (mettre logo_path à null)
+            $school->update([
+                'logo_path' => null,
+                'updated_by' => $currentUser->id,
+            ]);
+            
+            // CORRECTION: Supprimer le fichier APRÈS la mise à jour de la base
+            $deleted = $this->deleteLogoFile($logoPathToDelete);
+            
+            if (!$deleted) {
+                Log::warning('Logo file not found during deletion', [
+                    'logo_path' => $logoPathToDelete,
+                    'school_id' => $school->id
+                ]);
+            }
+            
+            DB::commit();
+
+            return response()->json([
+                'status' => 'success',
+                'message' => 'Logo supprimé avec succès',
+                'data' => [
+                    'school_id' => $school->id,
+                    'name' => $school->name,
+                    'file_deleted' => $deleted,
+                ],
+            ]);
+
+        } catch (\Exception $e) {
+            DB::rollBack();
+            Log::error('Error deleting school logo:', [
+                'error' => $e->getMessage(),
+                'trace' => $e->getTraceAsString(),
+                'school_id' => $id,
+            ]);
+
+            return response()->json([
+                'status' => 'error',
+                'message' => 'Erreur lors de la suppression du logo: ' . $e->getMessage(),
+            ], 500);
+        }
+    }
+
+    /**
+     * SUPPRIMER une école (soft delete) - NE PAS SUPPRIMER LE LOGO
      */
     public function destroy(Request $request, $id)
     {
@@ -468,7 +772,6 @@ class SchoolController extends Controller
             $currentUser = $request->user();
             $school = School::findOrFail($id);
             
-            // Vérifier les permissions
             if (!$this->checkSchoolPermissions($currentUser, $school)) {
                 return response()->json([
                     'status' => 'error',
@@ -476,7 +779,6 @@ class SchoolController extends Controller
                 ], 403);
             }
             
-            // Seul le superadmin peut supprimer définitivement les écoles
             if (!$this->isSuperAdmin($currentUser)) {
                 return response()->json([
                     'status' => 'error',
@@ -484,7 +786,6 @@ class SchoolController extends Controller
                 ], 403);
             }
             
-            // Vérifier si l'école a des années scolaires actives
             $hasActiveSchoolYears = $school->schoolYears()
                 ->where('is_active', true)
                 ->exists();
@@ -496,16 +797,18 @@ class SchoolController extends Controller
                 ], 400);
             }
             
-            // Soft delete
+            // CORRECTION: NE PAS supprimer le logo lors du soft delete
+            // Le logo est conservé pour une éventuelle restauration
+            Log::info('School soft deleted, logo preserved', [
+                'school_id' => $school->id,
+                'logo_path' => $school->logo_path,
+                'preserved_for_restore' => true,
+            ]);
+            
+            // Soft delete seulement
             $school->delete();
             
             DB::commit();
-            
-            Log::info('School deleted', [
-                'admin_id' => $currentUser->id,
-                'school_id' => $school->id,
-                'school_name' => $school->name,
-            ]);
             
             return response()->json([
                 'status' => 'success',
@@ -515,6 +818,7 @@ class SchoolController extends Controller
                     'name' => $school->name,
                     'deleted_at' => $school->deleted_at,
                     'can_be_restored' => true,
+                    'logo_preserved' => true, // Indiquer que le logo est conservé
                 ],
             ]);
             
@@ -553,6 +857,7 @@ class SchoolController extends Controller
                 ], 403);
             }
             
+            // Rechercher uniquement dans les écoles supprimées
             $school = School::onlyTrashed()->findOrFail($id);
             $school->restore();
             
@@ -616,7 +921,7 @@ class SchoolController extends Controller
     }
 
     /**
-     * STATISTIQUES des écoles
+     * STATISTIQUES des écoles (inclut les supprimées pour les superadmins)
      * GET /api/v1/admin/schools/statistics
      */
     public function statistics(Request $request)
@@ -624,7 +929,8 @@ class SchoolController extends Controller
         try {
             $currentUser = $request->user();
             
-            $query = School::query();
+            // Base query selon les permissions
+            $baseQuery = School::query();
             
             // Appliquer les filtres selon les permissions
             if (!$this->isSuperAdmin($currentUser)) {
@@ -636,18 +942,56 @@ class SchoolController extends Controller
                     ->value('school_id');
                 
                 if ($adminSchoolId) {
-                    $query->where('id', $adminSchoolId);
+                    $baseQuery->where('id', $adminSchoolId);
+                } else {
+                    // Si pas d'école assignée, retourner des statistiques vides
+                    return response()->json([
+                        'status' => 'success',
+                        'data' => [
+                            'total_schools' => 0,
+                            'active_schools' => 0,
+                            'deleted_schools' => 0,
+                            'schools_by_type' => [],
+                            'recent_schools_last_30_days' => 0,
+                        ],
+                        'message' => 'Statistiques récupérées avec succès',
+                    ]);
                 }
             }
             
-            $totalSchools = $query->count();
-            $activeSchools = $query->whereNull('deleted_at')->count();
-            $deletedSchools = $query->onlyTrashed()->count();
+            // Pour les statistiques totales, inclure les supprimées si superadmin
+            $totalQuery = clone $baseQuery;
+            if ($this->isSuperAdmin($currentUser)) {
+                $totalQuery->withTrashed();
+            }
+            $totalSchools = $totalQuery->count();
             
-            // Statistiques par type
-            $schoolsByType = School::select('type_id')
+            // Écoles actives (non supprimées)
+            $activeSchools = $baseQuery->whereNull('deleted_at')->count();
+            
+            // Écoles supprimées
+            $deletedQuery = School::query();
+            
+            if (!$this->isSuperAdmin($currentUser)) {
+                // School admin ne voit que son école (même supprimée)
+                if (isset($adminSchoolId)) {
+                    $deletedQuery->where('id', $adminSchoolId);
+                }
+            }
+            // Pour superadmin, pas besoin de filtre
+            
+            $deletedSchools = $deletedQuery->onlyTrashed()->count();
+            
+            // Statistiques par type (uniquement les actives)
+            $schoolsByTypeQuery = School::select('type_id')
                 ->selectRaw('COUNT(*) as count')
-                ->whereNull('deleted_at')
+                ->whereNull('deleted_at');
+                
+            if (!$this->isSuperAdmin($currentUser) && isset($adminSchoolId)) {
+                $schoolsByTypeQuery->where('id', $adminSchoolId);
+            }
+            
+            $schoolsByType = $schoolsByTypeQuery
                 ->groupBy('type_id')
                 ->with('type')
                 ->get()
@@ -658,9 +1002,15 @@ class SchoolController extends Controller
                     ];
                 });
             
-            // Écoles créées récemment (30 derniers jours)
-            $recentSchools = School::where('created_at', '>=', now()->subDays(30))
-                ->count();
+            // Écoles créées récemment (30 derniers jours, actives seulement)
+            $recentSchoolsQuery = School::where('created_at', '>=', now()->subDays(30))
+                ->whereNull('deleted_at');
+                
+            if (!$this->isSuperAdmin($currentUser) && isset($adminSchoolId)) {
+                $recentSchoolsQuery->where('id', $adminSchoolId);
+            }
+            
+            $recentSchools = $recentSchoolsQuery->count();
             
             return response()->json([
                 'status' => 'success',
@@ -685,5 +1035,18 @@ class SchoolController extends Controller
                 'error' => env('APP_DEBUG') ? $e->getMessage() : null,
             ], 500);
         }
+    }
+
+
+    /**
+     * Obtenir l'URL complète du logo
+    */
+    private function getLogoUrl($logoPath)
+    {
+        if (!$logoPath) {
+            return null;
+        }
+        // CORRECTION: Utiliser Storage::url() correctement
+        return Storage::url($logoPath);
     }
 }
