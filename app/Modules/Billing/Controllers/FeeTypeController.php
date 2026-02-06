@@ -14,6 +14,7 @@ use Rap2hpoutre\FastExcel\FastExcel;
 
 class FeeTypeController extends Controller
 {
+    
     /**
      * GET: Liste tous les types de frais avec pagination et filtres
      * GET /api/v1/admin/fee-types
@@ -23,8 +24,8 @@ class FeeTypeController extends Controller
         try {
             $currentUser = $request->user();
             
-            // Construire la requête
-            $query = FeeType::with([
+            // Construire la requête avec withTrashed pour inclure les supprimés
+            $query = FeeType::withTrashed()->with([
                 'school',
                 'createdBy',
                 'updatedBy'
@@ -53,6 +54,16 @@ class FeeTypeController extends Controller
                 $query->where('school_id', $request->school_id);
             }
             
+            // Filtre par statut (actif/supprimé/tous)
+            if ($request->has('status')) {
+                if ($request->status === 'active') {
+                    $query->whereNull('deleted_at');
+                } elseif ($request->status === 'deleted') {
+                    $query->onlyTrashed();
+                }
+                // Si 'all' ou autre, on garde withTrashed (déjà appliqué)
+            }
+            
             // Filtres
             if ($request->has('payable_by')) {
                 $query->where('payable_by', $request->payable_by);
@@ -62,7 +73,7 @@ class FeeTypeController extends Controller
                 $search = $request->search;
                 $query->where(function($q) use ($search) {
                     $q->where('name', 'like', "%{$search}%")
-                      ->orWhere('description', 'like', "%{$search}%");
+                    ->orWhere('description', 'like', "%{$search}%");
                 });
             }
             
@@ -84,10 +95,18 @@ class FeeTypeController extends Controller
                         'id' => $feeType->school->id,
                         'name' => $feeType->school->name,
                     ] : null,
-                    'created_by' => $feeType->createdBy ? $feeType->createdBy->full_name : null,
-                    'updated_by' => $feeType->updatedBy ? $feeType->updatedBy->full_name : null,
-                    'created_at' => $feeType->created_at->toIso8601String(),
-                    'updated_at' => $feeType->updated_at->toIso8601String(),
+                    'created_by' => $feeType->createdBy ? [
+                        'id' => $feeType->createdBy->id,
+                        'name' => $feeType->createdBy->full_name,
+                    ] : null,
+                    'updated_by' => $feeType->updatedBy ? [
+                        'id' => $feeType->updatedBy->id,
+                        'name' => $feeType->updatedBy->full_name,
+                    ] : null,
+                    'created_at' => $feeType->created_at ? $feeType->created_at->toIso8601String() : null,
+                    'updated_at' => $feeType->updated_at ? $feeType->updated_at->toIso8601String() : null,
+                    'deleted_at' => $feeType->deleted_at ? $feeType->deleted_at->toIso8601String() : null,
+                    'is_deleted' => !is_null($feeType->deleted_at),
                 ];
             });
             

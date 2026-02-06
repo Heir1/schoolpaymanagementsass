@@ -27,8 +27,8 @@ class StudentFeeController extends Controller
         try {
             $currentUser = $request->user();
             
-            // Vérifier que l'étudiant existe
-            $student = Student::with(['class.school'])->findOrFail($studentId);
+            // Vérifier que l'étudiant existe avec withTrashed pour voir même les supprimés
+            $student = Student::withTrashed()->with(['class.school'])->findOrFail($studentId);
             
             // Vérifier les permissions
             if ($currentUser->isSchoolAdmin()) {
@@ -41,14 +41,25 @@ class StudentFeeController extends Controller
                 }
             }
             
-            // Construire la requête
+            // Construire la requête avec withTrashed pour inclure les frais supprimés
             $query = StudentFee::where('student_id', $studentId)
+                ->withTrashed()
                 ->with([
                     'feeType',
                     'installments',
                     'createdBy',
                     'updatedBy'
                 ]);
+            
+            // Filtre par statut (actif/supprimé/tous)
+            if ($request->has('status')) {
+                if ($request->status === 'active') {
+                    $query->whereNull('deleted_at');
+                } elseif ($request->status === 'deleted') {
+                    $query->onlyTrashed();
+                }
+                // Si 'all' ou autre, on garde withTrashed (déjà appliqué)
+            }
             
             // Filtres
             if ($request->has('fee_type_id')) {
@@ -104,13 +115,21 @@ class StudentFeeController extends Controller
                             'id' => $installment->id,
                             'installment_no' => $installment->installment_no,
                             'amount' => (float) $installment->amount,
-                            'due_date' => $installment->due_date->toDateString(),
+                            'due_date' => $installment->due_date ? $installment->due_date->toDateString() : null,
                         ];
                     })->values(),
-                    'created_by' => $studentFee->createdBy ? $studentFee->createdBy->full_name : null,
-                    'updated_by' => $studentFee->updatedBy ? $studentFee->updatedBy->full_name : null,
-                    'created_at' => $studentFee->created_at->toIso8601String(),
-                    'updated_at' => $studentFee->updated_at->toIso8601String(),
+                    'created_by' => $studentFee->createdBy ? [
+                        'id' => $studentFee->createdBy->id,
+                        'name' => $studentFee->createdBy->full_name,
+                    ] : null,
+                    'updated_by' => $studentFee->updatedBy ? [
+                        'id' => $studentFee->updatedBy->id,
+                        'name' => $studentFee->updatedBy->full_name,
+                    ] : null,
+                    'created_at' => $studentFee->created_at ? $studentFee->created_at->toIso8601String() : null,
+                    'updated_at' => $studentFee->updated_at ? $studentFee->updated_at->toIso8601String() : null,
+                    'deleted_at' => $studentFee->deleted_at ? $studentFee->deleted_at->toIso8601String() : null,
+                    'is_deleted' => !is_null($studentFee->deleted_at),
                 ];
             });
             
@@ -121,7 +140,7 @@ class StudentFeeController extends Controller
                     'student' => [
                         'id' => $student->id,
                         'code' => $student->student_code,
-                        'full_name' => $student->first_name.' '.$student->last_name.' '.$student->middle_name,
+                        'full_name' => trim($student->first_name.' '.$student->last_name.' '.$student->middle_name),
                         'class' => $student->class ? [
                             'id' => $student->class->id,
                             'name' => $student->class->name,
@@ -130,6 +149,7 @@ class StudentFeeController extends Controller
                                 'name' => $student->class->school->name,
                             ] : null,
                         ] : null,
+                        'is_deleted' => !is_null($student->deleted_at),
                     ],
                     'fees' => $transformedFees,
                     'pagination' => [

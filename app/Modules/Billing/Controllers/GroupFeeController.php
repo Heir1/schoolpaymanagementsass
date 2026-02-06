@@ -28,8 +28,8 @@ class GroupFeeController extends Controller
         try {
             $currentUser = $request->user();
             
-            // Vérifier que le groupe existe
-            $studentGroup = StudentGroup::with(['school'])->findOrFail($groupId);
+            // Vérifier que le groupe existe avec withTrashed pour voir même les supprimés
+            $studentGroup = StudentGroup::withTrashed()->with(['school'])->findOrFail($groupId);
             
             // Vérifier les permissions
             if ($currentUser->isSchoolAdmin()) {
@@ -42,14 +42,25 @@ class GroupFeeController extends Controller
                 }
             }
             
-            // Construire la requête
+            // Construire la requête avec withTrashed pour inclure les frais supprimés
             $query = GroupFee::where('group_id', $groupId)
+                ->withTrashed()
                 ->with([
                     'feeType',
                     'installments',
                     'createdBy',
                     'updatedBy'
                 ]);
+            
+            // Filtre par statut (actif/supprimé/tous)
+            if ($request->has('status')) {
+                if ($request->status === 'active') {
+                    $query->whereNull('deleted_at');
+                } elseif ($request->status === 'deleted') {
+                    $query->onlyTrashed();
+                }
+                // Si 'all' ou autre, on garde withTrashed (déjà appliqué)
+            }
             
             // Filtres
             if ($request->has('fee_type_id')) {
@@ -88,8 +99,10 @@ class GroupFeeController extends Controller
             $perPage = $request->get('per_page', 20);
             $groupFees = $query->paginate($perPage);
             
-            // Nombre d'étudiants dans le groupe
-            $studentsCount = Student::where('student_group_id', $groupId)->count();
+            // Nombre d'étudiants dans le groupe (actifs seulement)
+            $studentsCount = Student::where('student_group_id', $groupId)
+                ->whereNull('deleted_at')
+                ->count();
             
             // Transformer les données pour la réponse
             $transformedFees = $groupFees->getCollection()->map(function ($groupFee) {
@@ -108,13 +121,21 @@ class GroupFeeController extends Controller
                             'id' => $installment->id,
                             'installment_no' => $installment->installment_no,
                             'amount' => (float) $installment->amount,
-                            'due_date' => $installment->due_date->toDateString(),
+                            'due_date' => $installment->due_date ? $installment->due_date->toDateString() : null,
                         ];
                     })->values(),
-                    'created_by' => $groupFee->createdBy ? $groupFee->createdBy->full_name : null,
-                    'updated_by' => $groupFee->updatedBy ? $groupFee->updatedBy->full_name : null,
-                    'created_at' => $groupFee->created_at->toIso8601String(),
-                    'updated_at' => $groupFee->updated_at->toIso8601String(),
+                    'created_by' => $groupFee->createdBy ? [
+                        'id' => $groupFee->createdBy->id,
+                        'name' => $groupFee->createdBy->full_name,
+                    ] : null,
+                    'updated_by' => $groupFee->updatedBy ? [
+                        'id' => $groupFee->updatedBy->id,
+                        'name' => $groupFee->updatedBy->full_name,
+                    ] : null,
+                    'created_at' => $groupFee->created_at ? $groupFee->created_at->toIso8601String() : null,
+                    'updated_at' => $groupFee->updated_at ? $groupFee->updated_at->toIso8601String() : null,
+                    'deleted_at' => $groupFee->deleted_at ? $groupFee->deleted_at->toIso8601String() : null,
+                    'is_deleted' => !is_null($groupFee->deleted_at),
                 ];
             });
             
@@ -131,6 +152,7 @@ class GroupFeeController extends Controller
                             'name' => $studentGroup->school->name,
                         ] : null,
                         'students_count' => $studentsCount,
+                        'is_deleted' => !is_null($studentGroup->deleted_at),
                     ],
                     'fees' => $transformedFees,
                     'pagination' => [

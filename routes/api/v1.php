@@ -16,6 +16,7 @@ use App\Modules\Billing\Controllers\StudentFeeController;
 use App\Modules\Billing\Controllers\GroupFeeController;
 use App\Modules\Billing\Controllers\StudentApplicableFeeController;
 use App\Modules\Billing\Controllers\PaymentMethodController;
+use App\Modules\Academic\Controllers\ProvinceController;
 
 
 /*
@@ -56,6 +57,7 @@ Route::prefix('v1')->group(function () {
 
     // Routes pour la gestion complète des utilisateurs par les administrateurs
     Route::prefix('admin')->middleware(['auth:sanctum'])->group(function () {
+
         // CRUD complet des utilisateurs
         Route::prefix('users')->group(function () {
 
@@ -181,16 +183,21 @@ Route::prefix('v1')->group(function () {
         });
         
         // Routes pour les documents requis par classe
+
         Route::prefix('classes/{classId}/required-documents')->group(function () {
             Route::get('/', [ClassRequiredDocumentController::class, 'index']);
+            Route::get('/deleted', [ClassRequiredDocumentController::class, 'indexDeleted']);
             Route::post('/', [ClassRequiredDocumentController::class, 'store']);
             Route::post('/bulk', [ClassRequiredDocumentController::class, 'bulkStore']);
-            Route::put('/bulk', [ClassRequiredDocumentController::class, 'bulkUpdate']); // Nouvelle route
-            Route::put('/replace', [ClassRequiredDocumentController::class, 'bulkReplace']); // Nouvelle route
+            Route::put('/bulk', [ClassRequiredDocumentController::class, 'bulkUpdate']); // Mise à jour en masse
+            Route::put('/replace', [ClassRequiredDocumentController::class, 'bulkReplace']); // Nouvelle route si nécessaire
             Route::put('/{id}', [ClassRequiredDocumentController::class, 'update']);
             Route::delete('/{id}', [ClassRequiredDocumentController::class, 'destroy']);
+            Route::post('/{id}/restore', [ClassRequiredDocumentController::class, 'restore']);
+            Route::delete('/{id}/force', [ClassRequiredDocumentController::class, 'forceDestroy']);
             Route::get('/available-documents', [ClassRequiredDocumentController::class, 'listAvailableDocuments']);
         });
+
         
         // Routes pour les relations
         Route::prefix('schools/{schoolId}')->group(function () {
@@ -241,6 +248,23 @@ Route::prefix('v1')->group(function () {
             Route::put('/{id}', [PaymentMethodController::class, 'update']);
             Route::delete('/{id}', [PaymentMethodController::class, 'destroy']);
             Route::post('/{id}/restore', [PaymentMethodController::class, 'restore']);
+        });
+
+
+        // Routes pour les provinces
+        Route::prefix('provinces')->group(function () {
+            Route::get('/', [ProvinceController::class, 'index']);
+            Route::post('/', [ProvinceController::class, 'store']);
+            Route::get('/search', [ProvinceController::class, 'search']);
+            Route::get('/statistics', [ProvinceController::class, 'statistics']);
+            
+            Route::prefix('{id}')->group(function () {
+                Route::get('/', [ProvinceController::class, 'show']);
+                Route::put('/', [ProvinceController::class, 'update']);
+                Route::delete('/', [ProvinceController::class, 'destroy']);
+                Route::post('/restore', [ProvinceController::class, 'restore']);
+                Route::get('/cities', [ProvinceController::class, 'getProvinceCities']);
+            });
         });
 
         // Routes pour les étudiants par classe
@@ -385,11 +409,11 @@ Route::prefix('v1')->group(function () {
             });
         });
 
+
         // Routes pour les frais de groupe par école
         Route::prefix('schools/{schoolId}/group-fees')->middleware(['auth:sanctum', 'role:school_admin,super_admin'])->group(function () {
             Route::get('/', [GroupFeeController::class, 'getBySchool']);
-        });
-        
+        });        
 
     });
 

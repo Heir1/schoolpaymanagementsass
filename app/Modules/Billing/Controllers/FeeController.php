@@ -28,8 +28,8 @@ class FeeController extends Controller
         try {
             $currentUser = $request->user();
             
-            // Construire la requête
-            $query = Fee::with([
+            // Construire la requête avec withTrashed pour inclure les supprimés
+            $query = Fee::withTrashed()->with([
                 'feeType.school',
                 'installments',
                 'classFees.class',
@@ -62,6 +62,16 @@ class FeeController extends Controller
                 $query->whereHas('feeType', function ($q) use ($request) {
                     $q->where('school_id', $request->school_id);
                 });
+            }
+            
+            // Filtre par statut (actif/supprimé/tous)
+            if ($request->has('status')) {
+                if ($request->status === 'active') {
+                    $query->whereNull('deleted_at');
+                } elseif ($request->status === 'deleted') {
+                    $query->onlyTrashed();
+                }
+                // Si 'all' ou autre, on garde withTrashed (déjà appliqué)
             }
             
             // Filtres
@@ -127,14 +137,22 @@ class FeeController extends Controller
                             'id' => $installment->id,
                             'installment_no' => $installment->installment_no,
                             'amount' => (float) $installment->amount,
-                            'due_date' => $installment->due_date->toDateString(),
+                            'due_date' => $installment->due_date ? $installment->due_date->toDateString() : null,
                         ];
                     })->values(),
                     'associated_classes_count' => $fee->classFees->count(),
-                    'created_by' => $fee->createdBy ? $fee->createdBy->full_name : null,
-                    'updated_by' => $fee->updatedBy ? $fee->updatedBy->full_name : null,
-                    'created_at' => $fee->created_at->toIso8601String(),
-                    'updated_at' => $fee->updated_at->toIso8601String(),
+                    'created_by' => $fee->createdBy ? [
+                        'id' => $fee->createdBy->id,
+                        'name' => $fee->createdBy->full_name,
+                    ] : null,
+                    'updated_by' => $fee->updatedBy ? [
+                        'id' => $fee->updatedBy->id,
+                        'name' => $fee->updatedBy->full_name,
+                    ] : null,
+                    'created_at' => $fee->created_at ? $fee->created_at->toIso8601String() : null,
+                    'updated_at' => $fee->updated_at ? $fee->updated_at->toIso8601String() : null,
+                    'deleted_at' => $fee->deleted_at ? $fee->deleted_at->toIso8601String() : null,
+                    'is_deleted' => !is_null($fee->deleted_at),
                 ];
             });
             
@@ -172,7 +190,7 @@ class FeeController extends Controller
     /**
      * POST: Créer un nouveau frais avec tranches/échéances et assignation aux classes
      * POST /api/v1/admin/fees
-     */
+    */
     public function store(Request $request)
     {
         DB::beginTransaction();
@@ -180,13 +198,12 @@ class FeeController extends Controller
         try {
             $currentUser = $request->user();
             
-            // Validation
+            // Validation - ENLEVER la validation de installment_no
             $validator = Validator::make($request->all(), [
                 'fee_type_id' => 'required|exists:fee_types,id',
                 'amount' => 'required|numeric|min:0',
                 'due_date' => 'required|date',
                 'installments' => 'nullable|array',
-                'installments.*.installment_no' => 'required_with:installments|integer|min:1',
                 'installments.*.due_date' => 'required_with:installments|date',
                 'installments.*.amount' => 'required_with:installments|numeric|min:0',
                 'class_ids' => 'nullable|array',
@@ -200,9 +217,6 @@ class FeeController extends Controller
                 'due_date.required' => 'La date d\'échéance est requise',
                 'due_date.date' => 'La date d\'échéance doit être une date valide',
                 'installments.array' => 'Les tranches doivent être un tableau',
-                'installments.*.installment_no.required' => 'Le numéro de tranche est requis',
-                'installments.*.installment_no.integer' => 'Le numéro de tranche doit être un entier',
-                'installments.*.installment_no.min' => 'Le numéro de tranche doit être au moins 1',
                 'installments.*.due_date.required' => 'La date d\'échéance de la tranche est requise',
                 'installments.*.due_date.date' => 'La date d\'échéance de la tranche doit être valide',
                 'installments.*.amount.required' => 'Le montant de la tranche est requis',
@@ -269,22 +283,13 @@ class FeeController extends Controller
                     ], 422);
                 }
                 
-                // Vérifier les numéros de tranche uniques
-                $installmentNos = collect($installments)->pluck('installment_no')->toArray();
-                if (count($installmentNos) !== count(array_unique($installmentNos))) {
-                    return response()->json([
-                        'status' => 'error',
-                        'message' => 'Les numéros de tranche doivent être uniques',
-                    ], 422);
-                }
-                
                 // Vérifier que les dates des tranches sont cohérentes
-                foreach ($installments as $installment) {
+                foreach ($installments as $index => $installment) {
                     // Optionnel : vérifier que la date de la tranche n'est pas après la date du frais
                     if (Carbon::parse($installment['due_date'])->gt(Carbon::parse($request->due_date))) {
                         return response()->json([
                             'status' => 'error',
-                            'message' => 'La date de la tranche ' . $installment['installment_no'] . ' ne peut pas être après la date d\'échéance du frais',
+                            'message' => 'La date de la tranche ' . ($index + 1) . ' ne peut pas être après la date d\'échéance du frais',
                         ], 422);
                     }
                 }
@@ -311,11 +316,12 @@ class FeeController extends Controller
                     'updated_by' => $currentUser->id,
                 ]);
             } else {
-                // Créer les tranches spécifiées
+                // Créer les tranches spécifiées avec auto-incrémentation
+                $installmentNo = 1;
                 foreach ($installments as $installmentData) {
                     FeeInstallment::create([
                         'fee_id' => $fee->id,
-                        'installment_no' => $installmentData['installment_no'],
+                        'installment_no' => $installmentNo++,
                         'amount' => $installmentData['amount'],
                         'due_date' => $installmentData['due_date'],
                         'created_by' => $currentUser->id,
@@ -453,13 +459,12 @@ class FeeController extends Controller
                 }
             }
             
-            // Validation
+            // Validation - ENLEVER la validation de installment_no
             $validator = Validator::make($request->all(), [
                 'fee_type_id' => 'sometimes|exists:fee_types,id',
                 'amount' => 'sometimes|numeric|min:0',
                 'due_date' => 'sometimes|date',
                 'installments' => 'nullable|array',
-                'installments.*.installment_no' => 'required_with:installments|integer|min:1',
                 'installments.*.due_date' => 'required_with:installments|date',
                 'installments.*.amount' => 'required_with:installments|numeric|min:0',
                 'class_ids' => 'nullable|array',
@@ -470,9 +475,6 @@ class FeeController extends Controller
                 'amount.min' => 'Le montant doit être supérieur ou égal à 0',
                 'due_date.date' => 'La date d\'échéance doit être une date valide',
                 'installments.array' => 'Les tranches doivent être un tableau',
-                'installments.*.installment_no.required' => 'Le numéro de tranche est requis',
-                'installments.*.installment_no.integer' => 'Le numéro de tranche doit être un entier',
-                'installments.*.installment_no.min' => 'Le numéro de tranche doit être au moins 1',
                 'installments.*.due_date.required' => 'La date d\'échéance de la tranche est requise',
                 'installments.*.due_date.date' => 'La date d\'échéance de la tranche doit être valide',
                 'installments.*.amount.required' => 'Le montant de la tranche est requis',
@@ -519,7 +521,6 @@ class FeeController extends Controller
                     // Si installments est vide, créer une tranche unique par défaut
                     $installments = [
                         [
-                            'installment_no' => 1,
                             'amount' => $newAmount,
                             'due_date' => $request->has('due_date') ? $request->due_date : $fee->due_date,
                         ]
@@ -535,15 +536,6 @@ class FeeController extends Controller
                         'message' => 'La somme des montants des tranches (' . $totalInstallmentsAmount . ') doit être égale au montant total (' . $newAmount . ')',
                         'total_installments_amount' => $totalInstallmentsAmount,
                         'total_amount' => $newAmount,
-                    ], 422);
-                }
-                
-                // Vérifier les numéros de tranche uniques
-                $installmentNos = collect($installments)->pluck('installment_no')->toArray();
-                if (count($installmentNos) !== count(array_unique($installmentNos))) {
-                    return response()->json([
-                        'status' => 'error',
-                        'message' => 'Les numéros de tranche doivent être uniques',
                     ], 422);
                 }
             } elseif ($request->has('amount')) {
@@ -602,11 +594,12 @@ class FeeController extends Controller
                 // Supprimer les tranches existantes
                 $fee->installments()->delete();
                 
-                // Créer les nouvelles tranches
+                // Créer les nouvelles tranches avec auto-incrémentation
+                $installmentNo = 1;
                 foreach ($installments as $installmentData) {
                     FeeInstallment::create([
                         'fee_id' => $fee->id,
-                        'installment_no' => $installmentData['installment_no'],
+                        'installment_no' => $installmentNo++,
                         'amount' => $installmentData['amount'],
                         'due_date' => $installmentData['due_date'],
                         'created_by' => $currentUser->id,

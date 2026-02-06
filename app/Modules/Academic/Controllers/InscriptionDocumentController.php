@@ -20,12 +20,13 @@ class InscriptionDocumentController extends Controller
     {
         return $user->userRoles()
             ->whereHas('role', function ($query) {
-                $query->where('name', 'superadmin');
+                $query->whereIn('name', ['superadmin', 'school_admin']);
             })
             ->exists();
+
     }
 
-    /**
+    /** 
      * Vérifier les permissions pour les documents d'inscription
      * Seul le superadmin peut gérer les documents d'inscription globaux
      */
@@ -38,7 +39,7 @@ class InscriptionDocumentController extends Controller
     /**
      * LISTER tous les documents d'inscription
      * GET /api/v1/admin/inscription-documents
-     */
+    */
     public function index(Request $request)
     {
         try {
@@ -58,49 +59,113 @@ class InscriptionDocumentController extends Controller
             // Construction de la requête
             $query = InscriptionDocument::with(['classRequiredDocuments.class', 'studentDocuments']);
             
+            // Gestion des documents supprimés
+            if ($request->has('status')) {
+                if ($request->status === 'active') {
+                    // Afficher uniquement les documents actifs
+                    $query->whereNull('deleted_at');
+                } elseif ($request->status === 'deleted') {
+                    // Afficher uniquement les documents supprimés
+                    $query->onlyTrashed();
+                } elseif ($request->status === 'all') {
+                    // Afficher tous les documents (actifs + supprimés)
+                    $query->withTrashed();
+                }
+            } else {
+                // Par défaut, afficher uniquement les documents actifs
+                $query->whereNull('deleted_at');
+            }
+            
             // Filtres optionnels
             if ($request->has('search')) {
                 $search = $request->input('search');
                 $query->where(function ($q) use ($search) {
                     $q->where('name', 'like', "%{$search}%")
-                      ->orWhere('description', 'like', "%{$search}%");
+                    ->orWhere('description', 'like', "%{$search}%")
+                    ->orWhere('full_name', 'like', "%{$search}%");
                 });
             }
             
-            if ($request->has('status')) {
-                if ($request->status === 'active') {
-                    $query->whereNull('deleted_at');
-                } elseif ($request->status === 'deleted') {
-                    $query->onlyTrashed();
-                }
+            // Filtre par date de suppression
+            if ($request->has('deleted_from')) {
+                $query->whereDate('deleted_at', '>=', $request->input('deleted_from'));
+            }
+            
+            if ($request->has('deleted_to')) {
+                $query->whereDate('deleted_at', '<=', $request->input('deleted_to'));
             }
             
             // Tri
             $sortField = $request->input('sort_by', 'name');
             $sortDirection = $request->input('sort_dir', 'asc');
+            
+            // Gestion spécifique du tri pour deleted_at
+            if ($sortField === 'deleted_at') {
+                // Pour trier par deleted_at, nous devons inclure les documents non supprimés
+                if (!$request->has('status') || $request->status !== 'deleted') {
+                    $query->withTrashed();
+                }
+            }
+            
             $query->orderBy($sortField, $sortDirection);
             
+            // Obtenir la pagination
             $documents = $query->paginate($perPage);
+            
+            // Calculer les statistiques pour les filtres
+            $totalActive = InscriptionDocument::whereNull('deleted_at')->count();
+            $totalDeleted = InscriptionDocument::onlyTrashed()->count();
+            $totalAll = $totalActive + $totalDeleted;
             
             // Formater la réponse
             $documents->getCollection()->transform(function ($document) {
+                $activeClassRequiredDocs = $document->classRequiredDocuments
+                    ->whereNull('deleted_at')
+                    ->where('is_mandatory', true);
+                
                 return [
                     'id' => $document->id,
                     'name' => $document->name,
                     'description' => $document->description,
                     'full_name' => $document->full_name,
-                    'required_by_classes_count' => $document->classRequiredDocuments->count(),
-                    'mandatory_by_classes_count' => $document->classRequiredDocuments->where('is_mandatory', true)->count(),
-                    'student_documents_count' => $document->studentDocuments->count(),
+                    'required_by_classes_count' => $document->classRequiredDocuments
+                        ->whereNull('deleted_at')
+                        ->count(),
+                    'mandatory_by_classes_count' => $activeClassRequiredDocs->count(),
+                    'student_documents_count' => $document->studentDocuments
+                        ->whereNull('deleted_at')
+                        ->count(),
                     'created_at' => $document->created_at,
                     'updated_at' => $document->updated_at,
                     'deleted_at' => $document->deleted_at,
+                    'is_deleted' => $document->deleted_at !== null,
+                    // Informations supplémentaires pour les documents supprimés
+                    'status' => $document->deleted_at ? 'deleted' : 'active',
+                    'deleted_since' => $document->deleted_at ? 
+                        Carbon::parse($document->deleted_at)->diffForHumans() : null,
                 ];
             });
             
             return response()->json([
                 'status' => 'success',
-                'data' => $documents,
+                'data' => array_merge(
+                    $documents->toArray(),
+                    [
+                        'statistics' => [
+                            'total' => $totalAll,
+                            'active' => $totalActive,
+                            'deleted' => $totalDeleted,
+                            'current_filter' => $documents->total(),
+                        ],
+                        'filters' => [
+                            'status' => $request->input('status', 'active'),
+                            'search' => $request->input('search'),
+                            'sort_by' => $sortField,
+                            'sort_dir' => $sortDirection,
+                            'per_page' => $perPage,
+                        ],
+                    ]
+                ),
                 'message' => 'Liste des documents d\'inscription récupérée avec succès',
             ]);
             

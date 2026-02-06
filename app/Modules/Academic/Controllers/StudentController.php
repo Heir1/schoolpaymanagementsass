@@ -30,8 +30,8 @@ class StudentController extends Controller
         try {
             $currentUser = $request->user();
             
-            // Construire la requête
-            $query = Student::with([
+            // Construire la requête avec withTrashed pour inclure les supprimés
+            $query = Student::withTrashed()->with([
                 'school',
                 'class',
                 'province',
@@ -64,6 +64,16 @@ class StudentController extends Controller
                 $query->where('school_id', $request->school_id);
             }
             
+            // Filtre par statut (actif/supprimé/tous)
+            if ($request->has('status')) {
+                if ($request->status === 'active') {
+                    $query->whereNull('deleted_at');
+                } elseif ($request->status === 'deleted') {
+                    $query->onlyTrashed();
+                }
+                // Si 'all' ou autre, on garde withTrashed (déjà appliqué)
+            }
+            
             // Filtres
             if ($request->has('class_id')) {
                 $query->where('class_id', $request->class_id);
@@ -81,9 +91,9 @@ class StudentController extends Controller
                 $search = $request->search;
                 $query->where(function($q) use ($search) {
                     $q->where('first_name', 'like', "%{$search}%")
-                      ->orWhere('last_name', 'like', "%{$search}%")
-                      ->orWhere('middle_name', 'like', "%{$search}%")
-                      ->orWhere('student_code', 'like', "%{$search}%");
+                    ->orWhere('last_name', 'like', "%{$search}%")
+                    ->orWhere('middle_name', 'like', "%{$search}%")
+                    ->orWhere('student_code', 'like', "%{$search}%");
                 });
             }
             
@@ -117,10 +127,18 @@ class StudentController extends Controller
                         'name' => $student->studentGroup->name,
                     ] : null,
                     'is_approved' => (bool)$student->is_approved,
-                    'created_by' => $student->createdBy ? $student->createdBy->full_name : null,
-                    'updated_by' => $student->updatedBy ? $student->updatedBy->full_name : null,
-                    'created_at' => $student->created_at->toIso8601String(),
-                    'updated_at' => $student->updated_at->toIso8601String(),
+                    'created_by' => $student->createdBy ? [
+                        'id' => $student->createdBy->id,
+                        'name' => $student->createdBy->full_name,
+                    ] : null,
+                    'updated_by' => $student->updatedBy ? [
+                        'id' => $student->updatedBy->id,
+                        'name' => $student->updatedBy->full_name,
+                    ] : null,
+                    'created_at' => $student->created_at ? $student->created_at->toIso8601String() : null,
+                    'updated_at' => $student->updated_at ? $student->updated_at->toIso8601String() : null,
+                    'deleted_at' => $student->deleted_at ? $student->deleted_at->toIso8601String() : null,
+                    'is_deleted' => !is_null($student->deleted_at),
                 ];
             });
             
