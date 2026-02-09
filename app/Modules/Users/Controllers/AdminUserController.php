@@ -66,6 +66,11 @@ class AdminUserController extends Controller
             return true;
         }
 
+        // Un utilisateur peut toujours modifier SON PROPRE profil
+        if ($targetUser && $adminUser->id === $targetUser->id) {
+            return true;
+        }
+
         // School admin ne peut gérer que les utilisateurs de son école
         $adminSchoolId = $adminUser->userRoles()
             ->whereHas('role', function ($query) {

@@ -17,6 +17,7 @@ use App\Modules\Billing\Controllers\GroupFeeController;
 use App\Modules\Billing\Controllers\StudentApplicableFeeController;
 use App\Modules\Billing\Controllers\PaymentMethodController;
 use App\Modules\Academic\Controllers\ProvinceController;
+use App\Modules\Academic\Controllers\ParentChildController;
 
 
 /*
@@ -417,11 +418,9 @@ Route::prefix('v1')->group(function () {
 
     });
 
-
     // Route publique pour générer un nouveau mot de passe initial
     Route::post('/generate-initial-password', [AdminUserController::class, 'generateNewInitialPassword']);
     Route::post('/forgot-password', [AuthController::class, 'forgotPassword']);
-
     
     // Routes publiques (sans authentification)
     Route::prefix('public')->group(function () {
@@ -488,4 +487,38 @@ Route::prefix('v1')->group(function () {
             });
         });
     });
+
+    // Routes pour les parents
+    Route::prefix('parent')->middleware(['auth:sanctum'])->group(function () {
+        
+        // Recherche d'écoles
+        Route::get('/schools/search', [ParentChildController::class, 'searchSchools']);
+        
+        // Classes d'une école
+        Route::get('/schools/{schoolId}/classes', [ParentChildController::class, 'getSchoolClasses']);
+        
+        // Étudiants d'une classe
+        Route::get('/classes/{classId}/students', [ParentChildController::class, 'getClassStudents']);
+        
+        // Gestion des enfants
+        Route::prefix('children')->group(function () {
+            // Vérifier si un enfant peut être lié
+            Route::get('/{studentId}/check', [ParentChildController::class, 'checkChildLink']);
+            
+            // Lier un enfant
+            Route::post('/link', [ParentChildController::class, 'linkChild']);
+            
+            // Délier un enfant
+            Route::delete('/{studentId}/unlink', [ParentChildController::class, 'unlinkChild']);
+            
+            // Liste des enfants liés
+            Route::get('/', [ParentChildController::class, 'getLinkedChildren']);
+        });
+        
+        // Statistiques
+        Route::get('/statistics', [ParentChildController::class, 'getStatistics']);
+        
+
+    });
+
 });

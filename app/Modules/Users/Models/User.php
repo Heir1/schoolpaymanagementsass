@@ -89,6 +89,11 @@ class User extends Authenticatable
         return $this->hasOne(ParentModel::class, 'user_id');
     }
 
+    public function parent()
+    {
+        return $this->hasOne(ParentModel::class, 'user_id');
+    }
+
     /**
      * Accessor pour l'URL complète de l'avatar
      */
@@ -183,6 +188,20 @@ class User extends Authenticatable
         
         return $schoolAdminRole ? $schoolAdminRole->pivot->school_id : null;
     }
+
+
+    /**
+     * Vérifier si l'utilisateur est un parent
+    */
+    public function isParent()
+    {
+        // Méthode 1: Vérifier par le rôle
+        return $this->hasRole('parent');
+        
+        // OU Méthode 2: Vérifier par la relation parent
+        // return $this->parent()->exists();
+    }
+
 
     /**
      * Vérifier si l'utilisateur est super_admin
